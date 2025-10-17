@@ -1,0 +1,3 @@
+[submodule "textlesslib"]
+	path = textlesslib
+	url = git@github.com:andybi7676/textlesslib.git
