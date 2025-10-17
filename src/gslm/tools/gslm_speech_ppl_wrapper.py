@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 import logging
+import argparse
 from omegaconf import OmegaConf
 from fairseq import utils
 from textless.data.speech_encoder import SpeechEncoder
@@ -15,25 +16,24 @@ log_format = "[%(asctime)s] [%(levelname)s]: %(message)s"
 logging.basicConfig(format=log_format, level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME="GSLM-greedy"
-GSLM_SAMPLING_RATE = 16000
+MODEL_NAME="GSLM"
+GSLM_INPUT_SAMPLE_RATE = 16000
 
 class GslmSpeechPplWrapper:
     def __init__(
         self, 
-        language_model_data_dir: str,
+        language_model_dir: str,
         seed: int = None,
         temperature: float = 0.7,
         vocab_size: int = 100,
         device: str = "cpu",
     ):
         logger.info("Initializing the GSLM pipeline.")
-        self.device = torch.device("cuda")
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
             utils.set_torch_seed(seed)
-        self.sampling_rate = GSLM_SAMPLING_RATE
+        self.input_sample_rate = GSLM_INPUT_SAMPLE_RATE
         self.vocab_size = vocab_size
         self.temperature = temperature
         self.tokens_framerate = 0.02  # HuBERT framerate
@@ -49,7 +49,7 @@ class GslmSpeechPplWrapper:
         }
         logger.info("... Loading the language model")
         self.sampler = UnitLanguageModelSampler.from_pretrained(
-            language_model_data_dir,
+            language_model_dir,
         )
         logger.info("=> Done!")
         logger.info("... Loading the encoder")
@@ -84,6 +84,10 @@ class GslmSpeechPplWrapper:
 
         logger.info("=> Done!")
         logger.info("GSLM pipeline initialized!")
+    
+    @property
+    def output_sample_rate(self) -> int:
+        return self.resynthesizer.output_sample_rate
 
     @torch.no_grad()
     def get_per_token_losses(
@@ -158,17 +162,24 @@ class GslmSpeechPplWrapper:
         return audio.cpu()
 
 if __name__ == "__main__":
-    testing_audio_fpath = "./work/data/samples/61-70968-0000_orig.flac"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--testing_audio_fpath", type=str, default=None)
+    parser.add_argument("--language_model_dir", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
     # detect device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device
     # create model
     model = GslmSpeechPplWrapper(
-        language_model_data_dir="./work/pretrained_models/gslm/hubert100_lm",
+        language_model_dir=args.language_model_dir,
         seed=None,
         temperature=0.7,
         vocab_size=100,
         device=device,
     )
+    print(f"Model Input Sample Rate: {model.input_sample_rate}")
+    print(f"Model Output Sample Rate: {model.output_sample_rate}")
 
     # function for localizing ppl function
     def get_per_token_losses(
@@ -189,12 +200,12 @@ if __name__ == "__main__":
         if "consistency" in e["task"]:
             e["prompt_sample_tokenwise_loss"] = get_per_token_losses(e["prompt_audio"])
             generated_audio = generate_continuation_audio(e["prompt_audio"])
-            e["model_generated_continuation"] = {"sampling_rate": model.sampling_rate, "array": generated_audio.squeeze().numpy()}
+            e["model_generated_continuation"] = {"sampling_rate": model.output_sample_rate, "array": generated_audio.squeeze().numpy()}
         
         
         e["code_frame_rate"] =  12,
         e["code_depth"] =  4
-        e["model_sampling_rate"] = model.sampling_rate,
+        e["model_sampling_rate"] = model.output_sample_rate,
         e["ppl_sanity"] = int((e["postive_sample_tokenwise_loss"].mean() < e["negative_sample_tokenwise_loss"].mean()).item()) #sanity check if number same as SALMon, would be rerun with other methods
         print("sample correct:",e["ppl_sanity"])
         return e
@@ -206,18 +217,33 @@ if __name__ == "__main__":
     # per_token_losses = get_per_token_losses(audio)
     # try hf salmon dataset
     from datasets import Audio, load_dataset
-    splts = ['bg_all_consistency', 'bg_domain_consistency']
+    splts = ['bg_all_consistency', 'bg_domain_consistency', 'gender_consistency', 'rir_consistency', 'sentiment_consistency', 'speaker_consistency', 'bg_alignment', 'sentiment_alignment']
+    # splts = ['bg_all_consistency']
     for splt in splts:
         print(splt)
         ds = load_dataset("SpeechPPL/SALMon_with_meta", splt)
-        #ds["train"] = ds["train"].select([1])
+        # ds["train"] = ds["train"].select([0])  # for testing purpose, only use 5 samples
         ds = ds.map(get_model_features)
-        ds = ds.cast_column("model_generated_continuation", Audio(sampling_rate=model.sampling_rate))
-        # print(ds[0])
+        ds = ds.cast_column("model_generated_continuation", Audio(sampling_rate=model.output_sample_rate))
         # save results
-        save_dir = f"./work/outputs/gslm/speech_ppl/{MODEL_NAME}/{splt}"
+        save_dir = os.path.join(args.output_dir, MODEL_NAME, splt)
         os.makedirs(save_dir, exist_ok=True)
         ds.save_to_disk(save_dir)
         print("Results saved to", save_dir)
+        # save 10 prompt contd generation results
+        gen_save_dir = os.path.join(save_dir, "generation_examples")
+        os.makedirs(gen_save_dir, exist_ok=True)
+        # for i, item in enumerate(ds['train']):
+        for i, item in enumerate(ds['train'].select([0, 1, 2, 3, 4, 5])):
+            if "model_generated_continuation" in item:
+                gen_audio = item["model_generated_continuation"]["array"]
+                gen_sr = item["model_generated_continuation"]["sampling_rate"]
+                gen_fpath = os.path.join(gen_save_dir, f"{i}_gen.wav")
+                torchaudio.save(gen_fpath, torch.Tensor(gen_audio).unsqueeze(0), gen_sr)
+                prompt_audio = item["prompt_audio"]["array"]
+                prompt_sr = 16000
+                prompt_fpath = os.path.join(gen_save_dir, f"{i}_prompt.wav")
+                torchaudio.save(prompt_fpath, torch.Tensor(prompt_audio).unsqueeze(0), prompt_sr)
+        print("Generation examples saved to", gen_save_dir)
         # push to hub
         ds.push_to_hub(f"SpeechPPL/SALMon_{MODEL_NAME}", config_name=splt)
