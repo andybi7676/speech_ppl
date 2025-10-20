@@ -6,31 +6,32 @@
 # clone speech_ppl
 git clone https://github.com/andybi7676/speech_ppl.git
 # update submodules recursively
+cd speech_ppl
 git submodule update --init --recursive
-# create the venv under textlesslib for gslm and twist
-cd textlesslib
+# create the venv under textlesslib for gslm
+mkdir -p venv/gslm
+cd venv/gslm
 uv python install 3.9
 uv venv --python 3.9
 source .venv/bin/activate
 # download older version of torch first
-uv pip install torch==1.13.1 torchaudio==0.13.1 transformers==4.53.0 datasets==3.6.0
-cd .. # go back to the root dir
+uv pip install torch==1.13.1 torchaudio==0.13.1 datasets==3.6.0
+cd ../.. # go back to the root dir
 # install fairseq mannually
 git clone https://github.com/facebookresearch/fairseq.git
 cd fairseq
 git checkout 3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99 # use the specific hash
-cd ..
-# install fairseq
+# install fairseq (should have venv (gslm) activated)
 uv pip install -e fairseq
-# install textlesslib
+# install textlesslib (should have venv (gslm) activated)
 uv pip install -e textlesslib
 ```
 
 ## Prepare GSLM Pretrained Model
 ```bash
-mkdir -p ./work/pretrained_models/GSLM
-wget https://dl.fbaipublicfiles.com/textless_nlp/gslm/hubert/lm_km100/hubert100_lm.tgz -O ./work/pretrained_models/GSLM/hubert100_lm.tgz
-cd ./work/pretrained_models/GSLM
+mkdir -p ./work/pretrained_models/gslm
+wget https://dl.fbaipublicfiles.com/textless_nlp/gslm/hubert/lm_km100/hubert100_lm.tgz -O ./work/pretrained_models/gslm/hubert100_lm.tgz
+cd ./work/pretrained_models/gslm
 tar -xzvf hubert100_lm.tgz
 cd ../../..
 ```
@@ -53,7 +54,31 @@ bash ./src/gslm/scripts/generate_greedy_result.sh
 # TWIST
 
 ## Setup Environment
-See [GSLM](#gslm)
+```bash
+# cd to your working directory
+# clone speech_ppl
+git clone https://github.com/andybi7676/speech_ppl.git
+# update submodules recursively
+cd speech_ppl
+git submodule update --init --recursive
+# create the venv under textlesslib for twist
+mkdir -p venv/twist
+cd venv/twist
+uv python install 3.9
+uv venv --python 3.9
+source .venv/bin/activate
+# download older version of torch first
+uv pip install torch==1.13.1 torchaudio==0.13.1 datasets==3.6.0
+cd ../.. # go back to the root dir
+# install fairseq mannually
+git clone https://github.com/facebookresearch/fairseq.git
+cd fairseq
+git checkout 3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99 # use the specific hash
+# install fairseq (should have venv (twist) activated)
+uv pip install -e fairseq
+# install textlesslib (should have venv (twist) activated)
+uv pip install -e textlesslib
+```
 
 ## Prepare TWIST Pretrained Model
 ```bash
