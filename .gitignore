@@ -4,6 +4,7 @@ transformers
 local/
 exp/
 tmp*.*
+fairseq
 # egs/taste/emilia_libritts
 
 # Byte-compiled / optimized / DLL files
