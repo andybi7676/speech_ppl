@@ -63,7 +63,6 @@ for audio_path in tqdm(conditional_audio_paths):
         output_text_info=True
     )
     inputs = _data.to(device=device)
-    print(inputs.keys())
     output = model.inference_completion(
         **inputs,
         conditional_mode='audio',
