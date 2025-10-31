@@ -89,14 +89,14 @@ class TwistSpeechPPLWrapper:
         units = self.encoder(raw_audio)['units']
         # perform deduplication
         input_ids, _durations = torch.unique_consecutive(units, return_counts=True)
-        input_ids = input_ids.unsqueeze(0)  # add batch dim (1, seq_len)
+        input_ids = input_ids.unsqueeze(0) + self.twist_lm.config.offset # add batch dim (1, seq_len)
         # prepare labels
         labels = input_ids.clone()
         labels[:, :-1] = input_ids[:, 1:].clone() # shift tokens to the left
         labels[:, -1] = -100  # don't predict the last token as it has no next token
 
         # get unit lm logits
-        logits = self.twist_lm(input_ids)[0] # skip special tokens
+        logits = self.twist_lm(input_ids)[0]
         # calcuate CE loss
         loss_all_tokens = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -104,7 +104,11 @@ class TwistSpeechPPLWrapper:
             ignore_index=-100,
             reduction='none',
         )
-        return loss_all_tokens
+        # return loss_all_tokens
+        return {
+            'loss_per_token': loss_all_tokens,
+            'raw_units': units
+        }
 
     @torch.no_grad()
     def generate_continuation_audio(
@@ -146,7 +150,8 @@ if __name__ == "__main__":
     argparser.add_argument("--prompt_duration_sec", type=float, default=None, help="Duration of the prompt in seconds")
     argparser.add_argument("--device", type=str, default=None, help="Device to use, e.g., 'cpu' or 'cuda'")
     argparser.add_argument("--test_only", action="store_true", help="Only test per token loss and generation")
-    argparser.add_argument("--extract_raw_units", action="store_true")
+    argparser.add_argument("--extract_raw_units_only", action="store_true")
+    argparser.add_argument("--skip_generation", action="store_true", help="Skip audio generation")
     args = argparser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     # get device
@@ -181,7 +186,7 @@ if __name__ == "__main__":
         exit(0)
     
     from datasets import Audio, load_dataset, load_from_disk
-    if not args.extract_raw_units:
+    if not args.extract_raw_units_only:
         # start SALMON dataset test
         # function for localizing ppl function
         def get_per_token_losses(
@@ -196,51 +201,64 @@ if __name__ == "__main__":
         # function for localizing get_model_features function
         def get_model_features(e):
             # audio is 16000hz, maybe resample 
-            e["postive_sample_tokenwise_loss"] = get_per_token_losses(e["positive_audio"])
-            e["negative_sample_tokenwise_loss"] = get_per_token_losses(e["negative_audio"])
+            positive_sample_loss_results = get_per_token_losses(e["positive_audio"])
+            e["postive_sample_tokenwise_loss"] = positive_sample_loss_results['loss_per_token']
+            e["postive_sample_raw_units"] = positive_sample_loss_results['raw_units']
+            negative_sample_loss_results = get_per_token_losses(e["negative_audio"])
+            e["negative_sample_tokenwise_loss"] = negative_sample_loss_results['loss_per_token']
+            e["negative_sample_raw_units"] = negative_sample_loss_results['raw_units']
             if "consistency" in e["task"]:
-                e["prompt_sample_tokenwise_loss"] = get_per_token_losses(e["prompt_audio"])
-                generated_audio = generate_continuation_audio(e["prompt_audio"])
-                e["model_generated_continuation"] = {"sampling_rate": model.output_sample_rate, "array": generated_audio.squeeze().numpy()}
+                prompt_sample_loss_results = get_per_token_losses(e["prompt_audio"])
+                e["prompt_sample_tokenwise_loss"] = prompt_sample_loss_results['loss_per_token']
+                e["prompt_sample_raw_units"] = prompt_sample_loss_results['raw_units']
+                if not args.skip_generation:
+                    generated_audio = generate_continuation_audio(e["prompt_audio"])
+                    e["model_generated_continuation"] = {"sampling_rate": model.output_sample_rate, "array": generated_audio.squeeze().numpy()}
             
             e["code_frame_rate"] =  25,
             e["code_depth"] =  1
+            e["offset"] = model.twist_lm.config.offset,
             e["model_sampling_rate"] = model.output_sample_rate,
             e["ppl_sanity"] = int((e["postive_sample_tokenwise_loss"].mean() < e["negative_sample_tokenwise_loss"].mean()).item()) #sanity check if number same as SALMon, would be rerun with other methods
-            print("sample correct:",e["ppl_sanity"])
+            # print("sample correct:",e["ppl_sanity"])
             return e
         # try hf salmon dataset
         splts = ['bg_all_consistency', 'bg_domain_consistency', 'gender_consistency', 'rir_consistency', 'sentiment_consistency', 'speaker_consistency']
         # splts = ['bg_alignment', 'sentiment_alignment']
+        # splts = ['gender_consistency', 'speaker_consistency']
         # splts = ['bg_all_consistency']
         for splt in splts:
             print(splt)
             ds = load_dataset("SpeechPPL/SALMon_with_meta", splt)
             # ds["train"] = ds["train"].select([0])  # for testing purpose, only use 5 samples
             ds = ds.map(get_model_features)
-            ds = ds.cast_column("model_generated_continuation", Audio(sampling_rate=model.output_sample_rate))
+            if not args.skip_generation:
+                ds = ds.cast_column("model_generated_continuation", Audio(sampling_rate=model.output_sample_rate))
             # save results
             save_dir = os.path.join(args.output_dir, MODEL_NAME, splt)
             os.makedirs(save_dir, exist_ok=True)
             ds.save_to_disk(save_dir)
             print("Results saved to", save_dir)
-            # save 10 prompt contd generation results
-            gen_save_dir = os.path.join(save_dir, "generation_examples")
-            os.makedirs(gen_save_dir, exist_ok=True)
-            # for i, item in enumerate(ds['train']):
-            for i, item in enumerate(ds['train'].select([0, 1, 2, 3, 4, 5])):
-                if "consistency" in item["task"]:
-                    gen_audio = item["model_generated_continuation"]["array"]
-                    gen_sr = item["model_generated_continuation"]["sampling_rate"]
-                    gen_fpath = os.path.join(gen_save_dir, f"{i}_gen.wav")
-                    torchaudio.save(gen_fpath, torch.Tensor(gen_audio).unsqueeze(0), gen_sr)
-                    prompt_audio = item["prompt_audio"]["array"]
-                    prompt_sr = 16000
-                    prompt_fpath = os.path.join(gen_save_dir, f"{i}_prompt.wav")
-                    torchaudio.save(prompt_fpath, torch.Tensor(prompt_audio).unsqueeze(0), prompt_sr)
-            print("Generation examples saved to", gen_save_dir)
+            if not args.skip_generation:
+                # save 10 prompt contd generation results
+                gen_save_dir = os.path.join(save_dir, "generation_examples")
+                os.makedirs(gen_save_dir, exist_ok=True)
+                for i, item in enumerate(ds['train'].select([0, 1, 2, 3, 4, 5])):
+                    if "consistency" in item["task"]:
+                        gen_audio = item["model_generated_continuation"]["array"]
+                        gen_sr = item["model_generated_continuation"]["sampling_rate"]
+                        gen_fpath = os.path.join(gen_save_dir, f"{i}_gen.wav")
+                        torchaudio.save(gen_fpath, torch.Tensor(gen_audio).unsqueeze(0), gen_sr)
+                        prompt_audio = item["prompt_audio"]["array"]
+                        prompt_sr = 16000
+                        prompt_fpath = os.path.join(gen_save_dir, f"{i}_prompt.wav")
+                        torchaudio.save(prompt_fpath, torch.Tensor(prompt_audio).unsqueeze(0), prompt_sr)
+                print("Generation examples saved to", gen_save_dir)
             # push to hub
-            ds.push_to_hub(f"SpeechPPL/SALMon_{MODEL_NAME}", config_name=splt)
+            # calculate ppl sanity
+            ppl_sanity = sum(ds['train']['ppl_sanity'])
+            print(f"Accuracy on {splt}: {ppl_sanity} / {len(ds['train'])} = {ppl_sanity / len(ds['train']):.4f}")
+            ds.push_to_hub(f"SpeechPPL/SALMon_{MODEL_NAME}_with_raw_units", config_name=splt)
     else:
         # extract raw units and save
         splts = ['bg_all_consistency', 'bg_domain_consistency', 'gender_consistency', 'rir_consistency', 'sentiment_consistency', 'speaker_consistency']
