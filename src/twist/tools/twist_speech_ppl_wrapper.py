@@ -150,9 +150,14 @@ if __name__ == "__main__":
     argparser.add_argument("--prompt_duration_sec", type=float, default=None, help="Duration of the prompt in seconds")
     argparser.add_argument("--device", type=str, default=None, help="Device to use, e.g., 'cpu' or 'cuda'")
     argparser.add_argument("--test_only", action="store_true", help="Only test per token loss and generation")
-    argparser.add_argument("--extract_raw_units_only", action="store_true")
+    argparser.add_argument("--extract_main_ppl_results", action="store_true")
+    argparser.add_argument("--extract_raw_units", action="store_true")
+    argparser.add_argument("--extract_additional_ppl_results", action="store_true")
     argparser.add_argument("--skip_generation", action="store_true", help="Skip audio generation")
+    argparser.add_argument("--overwrite_model_name", type=str, default=None, help="Overwrite model name for saving results" )
     args = argparser.parse_args()
+    if args.overwrite_model_name:
+        MODEL_NAME = args.overwrite_model_name
     os.makedirs(args.output_dir, exist_ok=True)
     # get device
     device = args.device if args.device else "cuda" if torch.cuda.is_available() else "cpu"
@@ -186,7 +191,7 @@ if __name__ == "__main__":
         exit(0)
     
     from datasets import Audio, load_dataset, load_from_disk
-    if not args.extract_raw_units_only:
+    if args.extract_main_ppl_results:
         # start SALMON dataset test
         # function for localizing ppl function
         def get_per_token_losses(
@@ -211,6 +216,12 @@ if __name__ == "__main__":
                 prompt_sample_loss_results = get_per_token_losses(e["prompt_audio"])
                 e["prompt_sample_tokenwise_loss"] = prompt_sample_loss_results['loss_per_token']
                 e["prompt_sample_raw_units"] = prompt_sample_loss_results['raw_units']
+                positive_continuation_result = get_per_token_losses(e["continuation_audio_positive"])
+                negative_continuation_result = get_per_token_losses(e["continuation_audio_negative"])
+                e["positive_continuation_tokenwise_loss"] = positive_continuation_result['loss_per_token']
+                e["positive_continuation_raw_units"] = positive_continuation_result['raw_units']
+                e["negative_continuation_tokenwise_loss"] = negative_continuation_result['loss_per_token']
+                e["negative_continuation_raw_units"] = negative_continuation_result['raw_units']
                 if not args.skip_generation:
                     generated_audio = generate_continuation_audio(e["prompt_audio"])
                     e["model_generated_continuation"] = {"sampling_rate": model.output_sample_rate, "array": generated_audio.squeeze().numpy()}
@@ -258,34 +269,14 @@ if __name__ == "__main__":
             # calculate ppl sanity
             ppl_sanity = sum(ds['train']['ppl_sanity'])
             print(f"Accuracy on {splt}: {ppl_sanity} / {len(ds['train'])} = {ppl_sanity / len(ds['train']):.4f}")
-            ds.push_to_hub(f"SpeechPPL/SALMon_{MODEL_NAME}_with_raw_units", config_name=splt)
-    else:
-        # extract raw units and save
-        splts = ['bg_all_consistency', 'bg_domain_consistency', 'gender_consistency', 'rir_consistency', 'sentiment_consistency', 'speaker_consistency']
-        # splts = ['bg_alignment', 'sentiment_alignment']
-        local_save_dir = os.path.join(args.output_dir, MODEL_NAME)
-        # localize the extract_units function
-        def extract_raw_units(audio):
-            return model.extract_raw_units(audio)
-
-        def get_model_features(e):
-            # audio is 16000hz, maybe resample 
-            positive_audio = e.get("positive_audio")
-            negative_audio = e.get("negative_audio")
-            prompt_audio = e.get("prompt_audio")
-            e["postive_sample_raw_units"] = extract_raw_units(positive_audio)
-            e["negative_sample_raw_units"] = extract_raw_units(negative_audio)
-            if "consistency" in e.get("task", ""):
-                e["prompt_sample_raw_units"] = extract_raw_units(prompt_audio)
-            return e
-
-        for splt in splts:
-            print(f"Loading dataset from {local_save_dir}...")
-            ds = load_from_disk(os.path.join(local_save_dir, splt))
-            ds = ds.map(get_model_features)
-            # save results
-            save_dir = os.path.join(args.output_dir, MODEL_NAME, "with_raw_units", splt)
-            os.makedirs(save_dir, exist_ok=True)
-            ds.save_to_disk(save_dir)
-            print("Raw unit results saved to", save_dir)
-            ds.push_to_hub(f"SpeechPPL/SALMon_{MODEL_NAME}_with_raw_units", config_name=splt)
+            ds.push_to_hub(f"SpeechPPL/SALMon_{MODEL_NAME}", config_name=splt)
+    if args.extract_raw_units:
+        print(
+            "Currently extracting raw units has been merged to the main ppl results extraction. \
+            Please use --extract_main_ppl_results, which will also extract raw units."
+        )
+    if args.extract_additional_ppl_results:
+        print(
+            "Currently extracting additional ppl results has been merged to the main ppl results extraction. \
+            Please use --extract_main_ppl_results, which will also extract additional ppl results."
+        )

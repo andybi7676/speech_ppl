@@ -141,8 +141,7 @@ class GslmSpeechPplWrapper:
         labels[:, -1] = -100  # don't predict the last token as it has no next token
 
         # get unit lm logits
-        logits = self.sampler.model(input_ids)[0] # skip special tokens
-        logits = logits[..., :self.vocab_size] 
+        logits = self.sampler.model(input_ids)[0] 
         # calcuate CE loss
         loss_all_tokens = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -150,11 +149,10 @@ class GslmSpeechPplWrapper:
             ignore_index=-100,
             reduction='none',
         )
-        # return {
-        #     "units": units,
-        #     "loss_all_tokens": loss_all_tokens
-        # }
-        return loss_all_tokens
+        return {
+            "raw_units": units,
+            "loss_per_tokens": loss_all_tokens
+        }
 
     @torch.no_grad()
     def generate_continuation_audio(
@@ -232,17 +230,29 @@ if __name__ == "__main__":
 
     def get_model_features(e):
         # audio is 16000hz, maybe resample 
-        e["postive_sample_tokenwise_loss"] = get_per_token_losses(e["positive_audio"])
-        e["negative_sample_tokenwise_loss"] = get_per_token_losses(e["negative_audio"])
+        positive_sample_loss_results = get_per_token_losses(e["positive_audio"])
+        e["positive_sample_tokenwise_loss"] = positive_sample_loss_results["loss_per_tokens"]
+        e["positive_sample_raw_units"] = positive_sample_loss_results['raw_units']
+        negative_sample_loss_results = get_per_token_losses(e["negative_audio"])
+        e["negative_sample_tokenwise_loss"] = negative_sample_loss_results["loss_per_tokens"]
+        e["negative_sample_raw_units"] = negative_sample_loss_results['raw_units']
         if "consistency" in e["task"]:
-            e["prompt_sample_tokenwise_loss"] = get_per_token_losses(e["prompt_audio"])
+            prompt_sample_loss_results = get_per_token_losses(e["prompt_audio"])
+            e["prompt_sample_tokenwise_loss"] = prompt_sample_loss_results["loss_per_tokens"]
+            e["prompt_sample_raw_units"] = prompt_sample_loss_results['raw_units']
+            positive_continuation_result = get_per_token_losses(e["continuation_audio_positive"])
+            negative_continuation_result = get_per_token_losses(e["continuation_audio_negative"])
+            e["positive_continuation_tokenwise_loss"] = positive_continuation_result['loss_per_token']
+            e["positive_continuation_raw_units"] = positive_continuation_result['raw_units']
+            e["negative_continuation_tokenwise_loss"] = negative_continuation_result['loss_per_token']
+            e["negative_continuation_raw_units"] = negative_continuation_result['raw_units']
             generated_audio = generate_continuation_audio(e["prompt_audio"])
             e["model_generated_continuation"] = {"sampling_rate": model.output_sample_rate, "array": generated_audio.squeeze().numpy()}
         
         e["code_frame_rate"] =  50,
         e["code_depth"] =  1
         e["model_sampling_rate"] = model.output_sample_rate,
-        e["ppl_sanity"] = int((e["postive_sample_tokenwise_loss"].mean() < e["negative_sample_tokenwise_loss"].mean()).item()) #sanity check if number same as SALMon, would be rerun with other methods
+        e["ppl_sanity"] = int((e["positive_sample_tokenwise_loss"].mean() < e["negative_sample_tokenwise_loss"].mean()).item()) #sanity check if number same as SALMon, would be rerun with other methods
         print("sample correct:",e["ppl_sanity"])
         return e
     
@@ -274,8 +284,8 @@ if __name__ == "__main__":
     if not args.extract_raw_units:
         # try hf salmon dataset
         from datasets import Audio, load_dataset
-        # splts = ['bg_all_consistency', 'bg_domain_consistency', 'gender_consistency', 'rir_consistency', 'sentiment_consistency', 'speaker_consistency', 'bg_alignment', 'sentiment_alignment']
-        splts = ['bg_alignment', 'sentiment_alignment']
+        splts = ['bg_all_consistency', 'bg_domain_consistency', 'gender_consistency', 'rir_consistency', 'sentiment_consistency', 'speaker_consistency', 'bg_alignment', 'sentiment_alignment']
+        # splts = ['bg_alignment', 'sentiment_alignment']
         # splts = ['bg_all_consistency']
         for splt in splts:
             print(splt)
